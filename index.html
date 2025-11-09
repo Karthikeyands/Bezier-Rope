@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>bezier rope (simple)</title>
+  <style>
+    html,body{margin:0;height:100%;background:#111;color:#ddd;font-family:monospace}
+    #c{display:block;width:100vw;height:100vh}
+    .hud{position:fixed;left:10px;top:10px;font-size:12px;opacity:.8}
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hud">drag mouse / touch to pull the rope (P1,P2 move with spring + damping)</div>
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    function fit() {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      canvas.width = Math.floor(innerWidth * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      canvas.style.width = innerWidth + 'px';
+      canvas.style.height = innerHeight + 'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    fit();
+    addEventListener('resize', fit);
+
+    // control points
+    let p0 = {x: innerWidth*0.15, y: innerHeight*0.5}; // fixed
+    let p3 = {x: innerWidth*0.85, y: innerHeight*0.5}; // fixed
+
+    // dynamic points
+    let p1 = {x: innerWidth*0.35, y: innerHeight*0.5};
+    let p2 = {x: innerWidth*0.65, y: innerHeight*0.5};
+
+    // velocities for spring physics
+    let v1 = {x:0,y:0};
+    let v2 = {x:0,y:0};
+
+    // mouse/touch target
+    let target = {x: innerWidth*0.5, y: innerHeight*0.5};
+    let dragging = false;
+
+    function lerp(a,b,t){return a+(b-a)*t;}
+    function sub(a,b){return {x:a.x-b.x,y:a.y-b.y}}
+    function add(a,b){return {x:a.x+b.x,y:a.y+b.y}}
+    function mul(a,s){return {x:a.x*s,y:a.y*s}}
+    function len(a){return Math.hypot(a.x,a.y) || 0}
+    function norm(a){ const L=len(a); return L?{x:a.x/L,y:a.y/L}:{x:0,y:0}; }
+
+    // cubic bezier point
+    function bezierPoint(t, P0,P1,P2,P3){
+      const u = 1-t;
+      const u2 = u*u, t2=t*t;
+      const b0 = u2*u;
+      const b1 = 3*u2*t;
+      const b2 = 3*u*t2;
+      const b3 = t2*t;
+      return {
+        x: b0*P0.x + b1*P1.x + b2*P2.x + b3*P3.x,
+        y: b0*P0.y + b1*P1.y + b2*P2.y + b3*P3.y
+      };
+    }
+
+    // derivative (tangent)
+    function bezierTangent(t, P0,P1,P2,P3){
+      const u = 1-t;
+      return {
+        x: 3*u*u*(P1.x-P0.x) + 6*u*t*(P2.x-P1.x) + 3*t*t*(P3.x-P2.x),
+        y: 3*u*u*(P1.y-P0.y) + 6*u*t*(P2.y-P1.y) + 3*t*t*(P3.y-P2.y)
+      };
+    }
+
+    // input
+    function setTargetFromEvent(e){
+      const rect = canvas.getBoundingClientRect();
+      if (e.touches && e.touches[0]) e = e.touches[0];
+      target.x = e.clientX - rect.left;
+      target.y = e.clientY - rect.top;
+    }
+    canvas.addEventListener('mousedown', e=>{dragging=true; setTargetFromEvent(e);});
+    canvas.addEventListener('mousemove', e=>{ if(dragging) setTargetFromEvent(e); });
+    addEventListener('mouseup', ()=>dragging=false);
+
+    canvas.addEventListener('touchstart', e=>{dragging=true; setTargetFromEvent(e);}, {passive:false});
+    canvas.addEventListener('touchmove', e=>{ if(dragging) setTargetFromEvent(e); e.preventDefault(); }, {passive:false});
+    addEventListener('touchend', ()=>dragging=false);
+
+    // physics params (tweak freely)
+    let k = 8.0;        // spring stiffness
+    let damping = 5.5;  // damping
+    let follow = 0.55;  // how much p1 tracks target vs p2 mirrors
+    let last = performance.now();
+
+    function step(dt){
+      // simple "targets" for p1 and p2 based on mouse
+      // p1 tries to go to target directly
+      const t1 = {x: lerp(p1.x, target.x, follow), y: lerp(p1.y, target.y, follow)};
+      // p2 tries to go to mirrored target across the middle of p0-p3
+      const mid = {x:(p0.x+p3.x)/2, y:(p0.y+p3.y)/2};
+      const mirror = add( mul( sub(mid, sub(target,mid) ), 1 ), {x:0,y:0} ); // simple mirror
+      const t2 = {x: lerp(p2.x, mirror.x, follow), y: lerp(p2.y, mirror.y, follow)};
+
+      // acceleration = -k*(pos - target) - damping*vel
+      const a1 = sub( mul( sub(t1,p1), k ), mul(v1, damping) );
+      const a2 = sub( mul( sub(t2,p2), k ), mul(v2, damping) );
+
+      // integrate (semi-implicit euler)
+      v1.x += a1.x*dt; v1.y += a1.y*dt;
+      v2.x += a2.x*dt; v2.y += a2.y*dt;
+
+      p1.x += v1.x*dt; p1.y += v1.y*dt;
+      p2.x += v2.x*dt; p2.y += v2.y*dt;
+    }
+
+    function draw(){
+      ctx.clearRect(0,0,innerWidth,innerHeight);
+
+      // guide: control points and lines
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#555';
+      ctx.beginPath();
+      ctx.moveTo(p0.x,p0.y); ctx.lineTo(p1.x,p1.y);
+      ctx.moveTo(p2.x,p2.y); ctx.lineTo(p3.x,p3.y);
+      ctx.stroke();
+
+      // curve
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.beginPath();
+      let first = true;
+      for(let t=0; t<=1.0001; t+=0.01){
+        const p = bezierPoint(t,p0,p1,p2,p3);
+        if(first){ ctx.moveTo(p.x,p.y); first=false; }
+        else ctx.lineTo(p.x,p.y);
+      }
+      ctx.stroke();
+
+      // tangents (short normalized sticks)
+      ctx.strokeStyle = '#a3e635';
+      const stepT = 0.1;
+      for(let t=0; t<=1.0001; t+=stepT){
+        const p = bezierPoint(t,p0,p1,p2,p3);
+        const d = bezierTangent(t,p0,p1,p2,p3);
+        const n = norm(d);
+        const L = 18; // length of drawn tangent
+        ctx.beginPath();
+        ctx.moveTo(p.x - n.x*L, p.y - n.y*L);
+        ctx.lineTo(p.x + n.x*L, p.y + n.y*L);
+        ctx.stroke();
+      }
+
+      // draw control points
+      function dot(p,color){
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2); ctx.fill();
+      }
+      dot(p0,'#f87171'); dot(p3,'#f87171');
+      dot(p1,'#fbbf24'); dot(p2,'#fbbf24');
+
+      // draw mouse target
+      ctx.fillStyle = '#94a3b8';
+      ctx.beginPath(); ctx.arc(target.x,target.y,3,0,Math.PI*2); ctx.fill();
+    }
+
+    function loop(now){
+      const dt = Math.min(1/30, (now-last)/1000); // clamp big jumps
+      last = now;
+      step(dt);
+      draw();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
